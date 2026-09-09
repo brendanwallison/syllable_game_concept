@@ -148,6 +148,14 @@
     </div>
   </footer>
 
+  <!-- Analytics. Order matters: consent sets the default-denied state before
+       anything can send, and track.js queues until consent resolves.
+       consent.js, track.js and page-events.js are copies - edit them in the
+       yorubadict repo and run analytics/copy-to-siblings.mjs. -->
+  <script src="/analytics/consent.js?v=1"></script>
+  <script src="/analytics/track.js?v=1"></script>
+  <script src="/analytics/page-events.js?v=1"></script>
+  <script>snPage.start('games', { trackGameLinks: true });</script>
   <script src="assets/main.js?v=2"></script>
 </body>
 </html>

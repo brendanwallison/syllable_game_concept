@@ -244,6 +244,7 @@ function toggleFullscreen() {
 }
 
 document.addEventListener('fullscreenchange', () => {
+    snGame.fullscreen(!!document.fullscreenElement);
     document.getElementById('fullscreen-btn')?.classList.toggle('active', !!document.fullscreenElement);
 });
 
@@ -486,6 +487,7 @@ function selectPlaylist(category) {
     activeLevels = gameData.filter((level) => level.category === category);
     if (activeLevels.length === 0) return; // shouldn't happen - button would be disabled
     document.getElementById('start-overlay').style.display = 'none';
+    snGame.playlistSelected(category, activeLevels.length);
     initializeThemeSelector();
     loadLevel(0);
 }
@@ -571,6 +573,7 @@ async function loadGame() {
 
         absorbLeftoverWords(gameData, wordPool);
 
+        snGame.start('tones', gameData);
         initializePlaylistMenu();
 
     } catch (error) {
@@ -725,6 +728,12 @@ function initializeThemeSelector() {
 }
 
 function loadLevel(levelIndex) {
+    // Advancing past the level we were on means that one is finished. Reported
+    // before the bounds check, so completing the LAST level still counts.
+    if (currentLevel && levelIndex === currentLevelIndex + 1) {
+        snGame.levelComplete(currentLevel);
+    }
+
     if (levelIndex >= activeLevels.length) {
         showToast("You've completed this playlist!", 'info', 0);
         return;
@@ -738,6 +747,7 @@ function loadLevel(levelIndex) {
     // The pitch lines on the tone buttons are drawn from the current
     // speaker's own measured contours, so they change with the level.
     renderTonePitchLines(currentLevel.speaker);
+    snGame.levelLoaded(currentLevel, currentLevel.speaker);
     loadWord(0);
 }
 
@@ -768,6 +778,7 @@ function loadWord(wordIndex) {
 
     renderCards();
     isTransitioning = false;
+    snGame.wordShown(currentWord, currentLevel);
 
     // Unlike the phonics game, the word plays by itself: picking the tones IS
     // the task here, so making the player tap to hear it first would just be
@@ -775,7 +786,7 @@ function loadWord(wordIndex) {
     // already unlocked audio. Touching the AudioContext here too so the
     // first synthesized tone isn't swallowed on iOS.
     getAudioCtx();
-    playFullWordAudio();
+    playFullWordAudio(false);
 }
 
 // Toggle the per-card tone-hint dots (see style.css's .card::before) on or
@@ -787,7 +798,10 @@ function toggleToneHint() {
     showingHint = !showingHint;
     document.getElementById('syllable-cards').classList.toggle('show-hint', showingHint);
     document.getElementById('hint-btn').classList.toggle('active', showingHint);
-    if (showingHint) playToneMelody(currentWord.targetTones, currentWord.speaker);
+    if (showingHint) {
+        snGame.hint('tone-melody');
+        playToneMelody(currentWord.targetTones, currentWord.speaker);
+    }
 }
 
 // Interrupting our own playback is normal here - every tap stops whatever
@@ -799,7 +813,12 @@ function reportAudioFailure(context, error) {
     console.warn(`Audio playback blocked or file missing (${context}):`, error);
 }
 
-function playFullWordAudio() {
+// fromUser is false for the two places the game plays the word by itself - on
+// loading a word, and again after a wrong answer. Only a replay the player
+// actually asked for is worth counting, because the number this feeds is
+// "which recordings are unclear", and an autoplay says nothing about that.
+function playFullWordAudio(fromUser = true) {
+    if (fromUser && currentWord) snGame.audio(currentWord, 'full');
     if (currentWord && currentWord.fullAudioUrl) {
         if (currentPlayingAudio) {
             currentPlayingAudio.pause();
@@ -826,6 +845,7 @@ function prevWord() {
     if (isTransitioning) return;
     const prevWordIndex = currentWordIndex - 1;
     if (prevWordIndex >= 0) {
+        snGame.back();
         loadWord(prevWordIndex);
     }
 }
@@ -833,6 +853,7 @@ function prevWord() {
 function skipWord() {
     if (isTransitioning) return; // Prevent spam-clicking
     isTransitioning = true;
+    snGame.skipped(currentWord, currentLevel);
     showToast("Skipping word...", 'skipping', 800);
     setTimeout(moveToNextWord, 800);
 }
@@ -887,6 +908,7 @@ function handleCardClick(index) {
 function playRecordedSyllable(index) {
     const info = syllableIndex[currentWord.speaker]?.[currentWord.markedSyllables[index]];
     if (!info || !info.audio) return;
+    snGame.audio(currentWord, 'syllable', index);
     if (currentPlayingAudio) {
         currentPlayingAudio.pause();
         currentPlayingAudio.currentTime = 0;
@@ -922,6 +944,18 @@ function nextEmptyCard(from) {
 
 function checkAnswer() {
     const isMatch = picks.every((pick, i) => pick === currentWord.targetTones[i]);
+
+    // expectedTones against chosenTones is the reason this game is worth
+    // instrumenting at all: across sessions the pair is a confusion matrix of
+    // Yoruba tone perception - whether high is mixed with mid more than mid
+    // with low, which positions in a word are reliably hard.
+    const wrongIndexes = [];
+    picks.forEach((pick, i) => { if (pick !== currentWord.targetTones[i]) wrongIndexes.push(i); });
+    snGame.answer(currentWord, currentLevel, isMatch, {
+        expectedTones: currentWord.targetTones.slice(),
+        chosenTones: picks.slice(),
+        wrongIndexes: wrongIndexes
+    });
 
     if (isMatch) {
         isSolved = true;
@@ -966,7 +1000,7 @@ function checkAnswer() {
         activeCard = 0;
         renderCards();
         isTransitioning = false;
-        playFullWordAudio();
+        playFullWordAudio(false);
     }, 900);
 }
 

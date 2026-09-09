@@ -82,6 +82,7 @@ function toggleFullscreen() {
 
 document.addEventListener('fullscreenchange', () => {
     document.getElementById('fullscreen-btn')?.classList.toggle('active', !!document.fullscreenElement);
+    snGame.fullscreen(!!document.fullscreenElement);
 });
 
 function shuffleArray(array) {
@@ -111,6 +112,7 @@ function selectPlaylist(category) {
     activeLevels = gameData.filter((level) => level.category === category);
     if (activeLevels.length === 0) return; // shouldn't happen - button would be disabled
     document.getElementById('start-overlay').style.display = 'none';
+    snGame.playlistSelected(category, activeLevels.length);
     initializeThemeSelector();
     loadLevel(0);
 }
@@ -203,6 +205,7 @@ async function loadGame() {
 
         addCoverageLevels(gameData, wordPool, dictionarySyllables);
 
+        snGame.start('phonics', gameData);
         initializePlaylistMenu();
 
     } catch (error) {
@@ -405,6 +408,12 @@ function initializeThemeSelector() {
 }
 
 function loadLevel(levelIndex) {
+    // Advancing past the level we were on means that one is finished. Reported
+    // before the bounds check, so completing the LAST level still counts.
+    if (currentLevel && levelIndex === currentLevelIndex + 1) {
+        snGame.levelComplete(currentLevel);
+    }
+
     if (levelIndex >= activeLevels.length) {
         showToast("You've completed this playlist!", 'info', 0);
         return;
@@ -412,6 +421,7 @@ function loadLevel(levelIndex) {
 
     currentLevelIndex = levelIndex;
     currentLevel = activeLevels[currentLevelIndex];
+    snGame.levelLoaded(currentLevel, CURRENT_SPEAKER);
     document.getElementById('theme-selector').value = currentLevelIndex;
     document.getElementById('theme-selector').title = currentLevel.levelId;
 
@@ -425,6 +435,7 @@ function loadWord(wordIndex) {
     
     maxSlots = currentWord.targetSyllables.length;
     queue = []; 
+    lastReportedQueue = '';
     
     const imgElement = document.getElementById('prompt-image');
     imgElement.onerror = function() {
@@ -442,6 +453,7 @@ function loadWord(wordIndex) {
 
     renderQueue();
     isTransitioning = false;
+    snGame.wordShown(currentWord, currentLevel);
 
     // CHANGE: Removed playFullWordAudio() from here so it doesn't auto-play
 }
@@ -455,6 +467,7 @@ function toggleToneHint() {
     showingHint = !showingHint;
     document.getElementById('queue-slots').classList.toggle('show-hint', showingHint);
     document.getElementById('hint-btn').classList.toggle('active', showingHint);
+    if (showingHint) snGame.hint('tone-dots');
 }
 
 // Interrupting our own playback is normal here - every syllable tap stops
@@ -470,6 +483,7 @@ function reportAudioFailure(context, error) {
 
 function playFullWordAudio() {
     if (currentWord && currentWord.fullAudioUrl) {
+        snGame.audio(currentWord, 'full');
         const promptAudio = new Audio(currentWord.fullAudioUrl);
         promptAudio.play().catch(error => console.log("Audio play blocked or missing."));
     }
@@ -491,6 +505,7 @@ function prevWord() {
     if (isTransitioning) return;
     const prevWordIndex = currentWordIndex - 1;
     if (prevWordIndex >= 0) {
+        snGame.back();
         loadWord(prevWordIndex);
     }
 }
@@ -542,6 +557,8 @@ function handleSyllableClick(buttonData) {
         currentPlayingAudio.play().catch((err) => reportAudioFailure(absoluteUrl, err));
     }
 
+    snGame.audio(currentWord, 'syllable', queue.length);
+
     queue.push(buttonData.text);
     if (queue.length > maxSlots) queue.shift(); 
 
@@ -555,17 +572,49 @@ function skipWord() {
     
     isTransitioning = true;
 
+    snGame.skipped(currentWord, currentLevel);
     showToast("Skipping word...", 'skipping', 800);
 
     // Wait a brief moment so they can read the message, then move on
     setTimeout(moveToNextWord, 800);
 }
 
+// The queue is a sliding window: handleSyllableClick pushes and then shifts
+// once it is full, so there is no submit button and no single moment that says
+// "this is my answer". A full queue that does not match is the closest thing to
+// a wrong attempt this game has, and every further tap produces another one.
+//
+// Two bounds keep that from becoming a stream of noise: an identical queue is
+// never reported twice in a row, and reporting stops after MAX_REPORTED_ATTEMPTS
+// on a word. Someone tapping at random should not outweigh someone thinking.
+let lastReportedQueue = '';
+const MAX_REPORTED_ATTEMPTS = 12;
+
 function checkWinCondition() {
-    const isMatch = queue.length === maxSlots &&
+    const isFull = queue.length === maxSlots;
+    const isMatch = isFull &&
                     queue.every((val, index) => val === currentWord.targetSyllables[index]);
 
+    // Reporting only - no marking, no sound, no penalty. This game has no
+    // score and no lives on purpose, and a wrong answer here still costs
+    // nothing. Adding visible failure feedback would be a change to how the
+    // game plays, which is a separate decision from measuring it.
+    if (isFull && !isMatch) {
+        const signature = queue.join('|');
+        if (signature !== lastReportedQueue && snGame.attempts() < MAX_REPORTED_ATTEMPTS) {
+            lastReportedQueue = signature;
+            snGame.answer(currentWord, currentLevel, false, {
+                expectedSyllables: currentWord.targetSyllables.slice(),
+                submittedQueue: queue.slice()
+            });
+        }
+    }
+
     if (isMatch) {
+        snGame.answer(currentWord, currentLevel, true, {
+            expectedSyllables: currentWord.targetSyllables.slice(),
+            submittedQueue: queue.slice()
+        });
         isTransitioning = true;
 
         // Stop the last syllable's click sound immediately - it used to
